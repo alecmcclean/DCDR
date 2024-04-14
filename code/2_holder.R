@@ -14,7 +14,7 @@ PARAM_DAT <- expand.grid(N = c(100, 1000, 5000),
 
 data <- data.frame()
 for (i in 1:nrow(PARAM_DAT)) {
-  data %<>% bind_rows(
+  data <- data %>% bind_rows(
     SimulateData(psi = 10, 
                  dimension = 1, 
                  beta = PARAM_DAT$beta[i], 
@@ -78,31 +78,38 @@ inf_data <- foreach(
 
 parallel::stopCluster(cl)
 
-
 #################################################
 ### Create figures to illustrate results 
 #################################################
 
 ##############################
-### Coverage and power
+### Coverage and width
 
-p1 <- inf_data %>%
+plot_data <- inf_data %>%
   filter(!(dimension == 4 & estimator == "unknown")) %>%
   mutate(cilb = psihat - qnorm(0.975) * sqrt(var / n),
          ciub = psihat + qnorm(0.975) * sqrt(var / n)) %>%
   group_by(dimension, smoothness, n, psi, estimator) %>%
   summarize(Coverage = mean(cilb <= psi & psi <= ciub),
-            Power = mean(!(cilb <= 0 & 0 <= ciub))) %>%
-  gather(var, value, Coverage, Power) %>%
-  mutate(cilb = value - sqrt(value * (1 - value) / NUM_ITERS),
-         ciub = value + sqrt(value * (1 - value) / NUM_ITERS),
+            Width = mean(ciub - cilb),
+            Width_sd = sd(ciub - cilb)) %>%
+  ungroup() %>%
+  gather(var, value, Coverage, Width) %>%
+  mutate(cilb = ifelse(var == "Coverage", 
+                       value - qnorm(0.975) * sqrt(value * (1 - value) / NUM_ITERS),
+                       value - qnorm(0.975) * Width_sd / sqrt(NUM_ITERS)),
+         ciub = ifelse(var == "Coverage",
+                       value + qnorm(0.975) * sqrt(value * (1 - value) / NUM_ITERS),
+                       value + qnorm(0.975) * Width_sd / sqrt(NUM_ITERS)),
          dim_label = paste0("d = ", dimension),
          smooth_label = paste0("s = ", smoothness),
          estimator = case_when(
            estimator == "dcdr" ~ "DCDR known density and smoothness",
            estimator == "scdr" ~ "SCDR",
            T ~ "DCDR unknown density or smoothness"
-         )) %>%
+         )) 
+
+p1 <- plot_data %>% filter(var == "Coverage") %>%
   ggplot(aes(x = n, y = value, color = estimator)) +
   geom_point() +
   geom_line() +
@@ -110,13 +117,28 @@ p1 <- inf_data %>%
   geom_hline(yintercept = 0.95, linetype = "dashed") +
   scale_x_log10(breaks = c(100, 300, 1000, 5000)) +
   scale_color_colorblind() +
-  facet_grid(var ~  reorder(dim_label, dimension) + reorder(smooth_label, smoothness), scales = "free_y") +
+  facet_wrap(~ reorder(dim_label, dimension) + reorder(smooth_label, smoothness), scales = "free") +
   theme_bw() +
   labs(x = "Sample Size", y = "", color = "Estimator") +
   theme(legend.position = "top")
 
-ggsave(plot = p1, filename = "../figures/holder_coverage_power.png",
-       width = 8, height = 5)
+ggsave(plot = p1, filename = "../figures/holder_ci_coverage.png",
+       width = 8, height = 6)
+
+p2 <- plot_data %>% filter(var == "Width") %>%
+  ggplot(aes(x = n, y = value, color = estimator)) +
+  geom_point() +
+  geom_line() +
+  geom_errorbar(aes(ymin = cilb, ymax = ciub)) +
+  scale_x_log10(breaks = c(100, 300, 1000, 5000)) +
+  scale_color_colorblind() +
+  facet_wrap(~ reorder(dim_label, dimension) + reorder(smooth_label, smoothness), scales = "free") +
+  theme_bw() +
+  labs(x = "Sample Size", y = "", color = "Estimator") +
+  theme(legend.position = "top")
+
+ggsave(plot = p2, filename = "../figures/holder_ci_width.png",
+       width = 8, height = 6)
 
 
 ##############################
@@ -129,7 +151,7 @@ plot_data <- inf_data %>%
 plot_data$normal_quantiles <- rep(qnorm(ppoints(NUM_ITERS)),
                                   nrow(unique(inf_data[c("dimension", "smoothness", "n", "psi", "estimator")])))
 
-p2 <- plot_data %>%
+p3 <- plot_data %>%
   filter(!(dimension == 4 & estimator == "unknown")) %>%
   filter(dimension == 1) %>%
   mutate(dim_label = paste0("d = ", dimension),
@@ -152,7 +174,5 @@ p2 <- plot_data %>%
        color = "Estimator") +
   theme(legend.position = "top")
 
-
-ggsave(plot = p2, filename = "../figures/holder_qq_plots.png",
+ggsave(plot = p3, filename = "../figures/holder_qq_plots.png",
        width = 12, height = 6)
-

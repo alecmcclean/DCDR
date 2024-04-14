@@ -159,11 +159,6 @@ Holder <- function(x, # Covariates
                    L # Parameter controlling signal to noise ratio
 ) {
   
-  # y <- bump(x, n = length(x), beta = beta, x0 = 0.5, K = K, L = L) # 1 bump
-  
-  # grid <- seq(0.1, 0.9, length.out = 4) # 4 bumps
-  # grid <- seq(0.01, 0.99, length.out = 50) # 50 bumps
-  
   # Create lots of bumps, evenly spaced across X
   grid <- seq(0, 1, length.out = 0.5 * length(x)^(1 / (2 * beta + 1))) # n^(1 / (2s + d)) bumps
   y <- rep(0, length(x))
@@ -369,4 +364,3 @@ GenerateEstimateHolderSmooth <- function(FOLD_SIZE, DIMENSION, BETA, PSI, ITER_N
   return(dat)
   
 }  
-
