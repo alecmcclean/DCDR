@@ -141,6 +141,15 @@ ggsave(plot = p2, filename = "../figures/holder_ci_width.png",
        width = 8, height = 6)
 
 
+### Check width for DCDR in d = 1, s = 0.1
+extrap_dat <- inf_data %>% 
+  filter(estimator == "dcdr", dimension == 1, smoothness == 0.1) %>%
+  mutate(ci_width = 2 * qnorm(0.975) * sqrt(var / n))
+
+mod <- lm(log(ci_width) ~ log(n), extrap_dat)
+cat("Confidence interval will be smaller than 10 at roughly n = ", 
+    signif(exp((coef(mod)[[1]] - log(10)) / abs(coef(mod)[[2]])), 2))
+
 ##############################
 ### QQ plot
 
