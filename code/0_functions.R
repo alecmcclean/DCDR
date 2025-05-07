@@ -220,7 +220,7 @@ CDA_LPR <- function(est_cov, bandwidth, train_cov, train_outcome) {
 ### Assumes d = 1
 LPR <- function(est_cov, train_cov, train_outcome) {
   
-  ### Just use the 10 nearest neighbors - implicitly choosing very small bandwidth
+  ### Use the 10 nearest neighbors - implicitly choosing very small bandwidth
   ### kernel and local linear regression
   knn_index <- get.knnx(train_cov, est_cov, k = 10)$nn.index
   
@@ -247,25 +247,33 @@ GenerateEstimateHolderSmooth <- function(FOLD_SIZE, DIMENSION, BETA, PSI, ITER_N
   library(magrittr)
   library(FNN)
   
-  ### Create dataset
-  data <- SimulateData(psi = PSI, dimension = DIMENSION,
-                       beta = BETA, N = 3 * FOLD_SIZE, signal_amp = 50)
+  ### 1) Create dataset of total size 3 * FOLD_SIZE
+  data <- SimulateData(
+    psi = PSI, 
+    dimension = DIMENSION,
+    beta = BETA, 
+    N = 3 * FOLD_SIZE, 
+    signal_amp = 50
+  )
   
-  ### Create two training sets and one estimation set
+  # Shuffle row indices
   indices <- sample(nrow(data))
-  train_A <- data[indices[1:(length(indices)/3)],]
-  train_Y <- data[indices[(length(indices)/3 + 1):(2*length(indices)/3)],]
-  estimation <- data[indices[(2*length(indices)/3 + 1):length(indices)],]
   
-  ### Define bandwidths
+  # Create a fold index: 1,2,3 repeated FOLD_SIZE times
+  # Make sure length matches exactly 3 * FOLD_SIZE
+  fold_index <- rep(0:2, each = FOLD_SIZE)
+  # Shuffle fold_index to match the randomly permuted `indices`
+  fold_index <- fold_index[order(indices)]
+  
+  # Reorder `data` rows so that row 1 has fold_index[1], row 2 has fold_index[2], etc.
+  data <- data[order(indices), ]
+  
+  ### 2) Define bandwidths (they are the same across all folds)
   if (BETA < DIMENSION / 4) {
-    
     # Undersmooth pihat and make muhat consistent
     PI_BANDWIDTH <- FOLD_SIZE^(-2.01 / (4 * BETA + DIMENSION))
     MU_BANDWIDTH <- FOLD_SIZE^(-1 / DIMENSION)
-    
   } else {
-    
     # Undersmooth both with bandwidth like n^{-1/d}
     PI_BANDWIDTH <- MU_BANDWIDTH <- FOLD_SIZE^(-1 / DIMENSION)
   }
@@ -273,94 +281,155 @@ GenerateEstimateHolderSmooth <- function(FOLD_SIZE, DIMENSION, BETA, PSI, ITER_N
   # Construct optimal bandwidth for SCDR estimator
   OPTIMAL_BANDWIDTH <- FOLD_SIZE^(-1 / (2 * BETA + DIMENSION))
   
-  ### Estimate the nuisance functions!
-  estimation$pihat <- estimation$muhat <- NA
-  estimation$pihat_scdr <- estimation$muhat_scdr <- NA
-  estimation$pihat_unknown <- estimation$muhat_unknown <- NA
-  
-  for (k in 1:nrow(estimation)) {
-    
-    ###################################################
-    ### Undersmoothed estimator with knowledge
-    ### of covariate density
-    
-    # Undersmooth pihat
-    estimation$pihat[k] <-
-      CDA_LPR(select(estimation, contains("X")) %>% slice(k), # Estimation covariate at which to predict
-              bandwidth = PI_BANDWIDTH, # Bandwidth
-              train_cov = select(train_A, contains("X")), # All training covariates
-              train_outcome = train_A$A) # All training outcomes
-    
-    # Have muhat as a consistent estimator
-    estimation$muhat[k] <- CDA_LPR(select(estimation, contains("X")) %>% slice(k),
-                                   bandwidth = MU_BANDWIDTH,
-                                   train_cov = select(train_Y, contains("X")),
-                                   train_outcome = train_Y$Y)
-    
-    
-    ######################################
-    ### Optimal estimators for SCDR
-    
-    # Construct optimal CDA-LPR estimators for the single cross-fit estimator
-    estimation$pihat_scdr[k] <-
-      CDA_LPR(select(estimation, contains("X")) %>% slice(k), # Estimation covariate at which to predict
-              bandwidth = OPTIMAL_BANDWIDTH, # Bandwidth
-              train_cov = select(train_A, contains("X")), # All training covariates
-              train_outcome = train_A$A) # All training outcomes
-    
-    # Use the same estimate because A = Y
-    estimation$muhat_scdr[k] <- estimation$pihat_scdr[k]
-    
-  }
-  
-  if (all(estimation$pihat == 0, estimation$muhat == 0)) {
-    stop("All predictions zero")
-  }
-  
-  #########################################
-  ### Undersmoothed estimators w/out
-  ### knowledge of covariate density
-  ### (if relevant)
-  
-  if (DIMENSION == 1 & BETA <= 1) {
-    
-    # Construct undersmoothed estimators without knowledge of the covariate density
-    estimation$pihat_unknown <- LPR(est_cov = estimation$X1,
-                                    train_cov = train_A$X1,
-                                    train_outcome = train_A$A)
-    
-    estimation$muhat_unknown <- LPR(est_cov = estimation$X1,
-                                    train_cov = train_Y$X1,
-                                    train_outcome = train_Y$Y)
-    
-  } else {
-    estimation$pihat_unknown <- estimation$muhat_unknown <- 0
-  }
-  
-  # Calculate influence function with each nuisance function estimators
-  estimation <- estimation %>% 
+  ### 3) Initialize empty columns for all predictions in the full data
+  data <- data %>%
     mutate(
-      varphihat_dcdr = (A - pihat) * (Y - muhat),
-      varphihat_scdr = (A - pihat_scdr) * (Y - muhat_scdr),
+      pihat          = NA_real_,
+      muhat          = NA_real_,
+      pihat_scdr     = NA_real_,
+      muhat_scdr     = NA_real_,
+      pihat_unknown  = NA_real_,
+      muhat_unknown  = NA_real_
+    )
+  
+  ### 4) Loop over each of the 3 folds
+  for (i in 0:2) {
+
+    # Define test/estimation indices as the rows in fold i
+    test_indices  <- which(fold_index == i)
+    
+    # Define training indices
+    train_A_indices <- which(fold_index == mod(i+1,3))
+    train_Y_indices <- which(fold_index == mod(i+2,3))
+    
+    # Separate training sets for double cross-fitting
+    train_A <- data[train_A_indices, ]
+    train_Y <- data[train_Y_indices, ]
+    
+    # Same training set for single cross-fitting
+    train_both <- bind_rows(train_A, train_Y)
+    
+    # Test (estimation) set
+    test_set <- data[test_indices, ]
+    stopifnot("Missing data" = nrow(train_A) > 0 & nrow(train_Y) > 0 & nrow(test_set) > 0)
+    
+    ### 4a) Compute (pihat, muhat) for each test point in this fold
+    for (k in seq_len(nrow(test_set))) {
+      
+      # Covariate of the test point
+      x_test <- select(test_set, contains("X")) %>% slice(k)
+      
+      # ========== DCDR known density and smoothness ========== #
+      # Undersmoothed pihat
+      pihat_val <-
+        CDA_LPR(
+          x_test,
+          bandwidth     = PI_BANDWIDTH,
+          train_cov     = select(train_A, contains("X")),
+          train_outcome = train_A$A
+        )
+      
+      # Consistent muhat
+      muhat_val <-
+        CDA_LPR(
+          x_test,
+          bandwidth     = MU_BANDWIDTH,
+          train_cov     = select(train_Y, contains("X")),
+          train_outcome = train_Y$Y
+        )
+      
+      # ========== SCDR-MSE (optimal bandwidth) ========== #
+      pihat_scdr_val <-
+        CDA_LPR(
+          x_test,
+          bandwidth     = OPTIMAL_BANDWIDTH,
+          train_cov     = select(train_both, contains("X")),
+          train_outcome = train_both$A
+        )
+      
+      muhat_scdr_val <- pihat_scdr_val
+      
+      # Save in test_set
+      test_set$pihat[k]       <- pihat_val
+      test_set$muhat[k]       <- muhat_val
+      test_set$pihat_scdr[k]  <- pihat_scdr_val
+      test_set$muhat_scdr[k]  <- muhat_scdr_val
+    }
+    
+    ### 4b) Re-insert test_set predictions back into the main data
+    data[test_indices, c("pihat","muhat","pihat_scdr","muhat_scdr")] <-
+      test_set[, c("pihat","muhat","pihat_scdr","muhat_scdr")]
+    
+    if (isTRUE(DIMENSION == 1) && isTRUE(BETA <= 1)) {
+
+      if (length(test_indices) > 0 && length(train_A$X1) > 0) {
+        
+        data[test_indices, c("pihat_unknown")] <-
+          LPR(
+            est_cov       = data[test_indices,]$X1,
+            train_cov     = train_A$X1,
+            train_outcome = train_A$A
+          )
+        
+        data[test_indices, c("muhat_unknown")] <-
+          LPR(
+            est_cov       = data[test_indices,]$X1,
+            train_cov     = train_Y$X1,
+            train_outcome = train_Y$Y
+        )
+    
+      
+      } else {
+        data[test_indices, c("pihat_unknown")] <- 0
+        data[test_indices, c("muhat_unknown")] <- 0
+      }
+    }
+  }
+  
+
+  
+  ### 6) Now compute the influence-function–based estimates
+  #     over the *entire* data set (all folds combined).
+  data <- data %>%
+    mutate(
+      varphihat_dcdr    = (A - pihat) * (Y - muhat),
+      varphihat_scdr    = (A - pihat_scdr) * (Y - muhat_scdr),
       varphihat_unknown = (A - pihat_unknown) * (Y - muhat_unknown)
     )
   
-  # Add all the relevant information to the storage dataset
-  dat <- data.frame(estimator = "dcdr",
-                    psihat = mean(estimation$varphihat_dcdr),
-                    var = var(estimation$varphihat_dcdr)) %>%
-    bind_rows(data.frame(estimator = "scdr",
-                         psihat = mean(estimation$varphihat_scdr),
-                         var = var(estimation$varphihat_scdr))) %>%
-    bind_rows(data.frame(estimator = "unknown",
-                         psihat = mean(estimation$varphihat_unknown),
-                         var = var(estimation$varphihat_unknown))) %>%
-    mutate(dimension = DIMENSION, 
-           smoothness = BETA, 
-           n = FOLD_SIZE,
-           psi = PSI,
-           iter = ITER_NUMBER)
+  # Safety check: if everything predicted is 0
+  if (all(data$pihat == 0, data$muhat == 0)) {
+    stop("All predictions (pihat, muhat) were zero.")
+  }
+  
+  ### 7) Summarize into a final data.frame to return
+  dat <- data.frame(
+    estimator = "dcdr",
+    psihat    = mean(data$varphihat_dcdr),
+    var       = var(data$varphihat_dcdr)
+  ) %>%
+    bind_rows(
+      data.frame(
+        estimator = "scdr",
+        psihat    = mean(data$varphihat_scdr),
+        var       = var(data$varphihat_scdr)
+      )
+    ) %>%
+    bind_rows(
+      data.frame(
+        estimator = "unknown",
+        psihat    = mean(data$varphihat_unknown),
+        var       = var(data$varphihat_unknown)
+      )
+    ) %>%
+    mutate(
+      dimension  = DIMENSION,
+      smoothness = BETA, 
+      n          = FOLD_SIZE * 3,
+      psi        = PSI,
+      iter       = ITER_NUMBER
+    )
   
   return(dat)
+}
   
-}  
